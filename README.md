@@ -33,9 +33,25 @@ These five workloads are reproduced from the
 LLM-Enabled Hierarchical Optimizer for Tensor Computation Graphs"* (Table 1).
 See the upstream repository for license and citation details.
 
+## Benchmark
+
+`bench.py` times three variants per workload and writes a Markdown summary:
+
+```bash
+python bench.py --device cuda --bench-runs 30 --warmup 5
+# writes results/benchmark.md
+```
+
+Variants measured per workload:
+
+- `ref` — `model_ref.py`, eager
+- `eager` — `model_new.py`, eager (no `torch.compile`)
+- `compile` — `model_new.py`, wrapped with `torch.compile`
+
 ## Layout
 
 ```
+bench.py
 workloads/
   resnet/
     model_ref.py
