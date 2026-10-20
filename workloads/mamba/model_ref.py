@@ -222,7 +222,7 @@ seq_length = 2048
 
 
 def get_inputs():
-    return [torch.randn(batch_size, seq_length, d_model, dtype=torch.float16, device="cuda")]
+    return [torch.randn(batch_size, seq_length, d_model, dtype=torch.float16)]
 
 
 def get_init_inputs():
@@ -234,7 +234,7 @@ if __name__ == "__main__":
     print("Mamba-2 SSD clean model (single 1.3B config)")
     print("=" * 60)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mlu" if torch.mlu.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     model = Model(*get_init_inputs()).to(device)
     model.eval()
 

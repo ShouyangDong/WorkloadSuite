@@ -149,7 +149,7 @@ def attention(q, k, v, heads, mask=None):
 
 class Mlp(nn.Module):
 
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, bias=True, dtype=torch.float16, device='cuda'):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, bias=True, dtype=torch.float16, device=None):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -166,7 +166,7 @@ class Mlp(nn.Module):
 
 class PatchEmbed(nn.Module):
 
-    def __init__(self, img_size: Optional[int]=224, patch_size: int=16, in_chans: int=3, embed_dim: int=768, flatten: bool=True, bias: bool=True, strict_img_size: bool=True, dynamic_img_pad: bool=False, dtype=torch.float16, device='cuda'):
+    def __init__(self, img_size: Optional[int]=224, patch_size: int=16, in_chans: int=3, embed_dim: int=768, flatten: bool=True, bias: bool=True, strict_img_size: bool=True, dynamic_img_pad: bool=False, dtype=torch.float16, device=None):
         super().__init__()
         self.patch_size = (patch_size, patch_size)
         self.img_size = (img_size, img_size)
@@ -190,7 +190,7 @@ def modulate(x, shift, scale):
 
 class TimestepEmbedder(nn.Module):
 
-    def __init__(self, hidden_size, frequency_embedding_size=256, dtype=torch.float16, device='cuda'):
+    def __init__(self, hidden_size, frequency_embedding_size=256, dtype=torch.float16, device=None):
         super().__init__()
         self.mlp = nn.Sequential(nn.Linear(frequency_embedding_size, hidden_size, bias=True, dtype=dtype, device=device), nn.SiLU(), nn.Linear(hidden_size, hidden_size, bias=True, dtype=dtype, device=device))
         self.frequency_embedding_size = frequency_embedding_size
@@ -211,7 +211,7 @@ class TimestepEmbedder(nn.Module):
 
 class VectorEmbedder(nn.Module):
 
-    def __init__(self, input_dim: int, hidden_size: int, dtype=torch.float16, device='cuda'):
+    def __init__(self, input_dim: int, hidden_size: int, dtype=torch.float16, device=None):
         super().__init__()
         self.mlp = nn.Sequential(nn.Linear(input_dim, hidden_size, bias=True, dtype=dtype, device=device), nn.SiLU(), nn.Linear(hidden_size, hidden_size, bias=True, dtype=dtype, device=device))
 
@@ -230,7 +230,7 @@ def optimized_attention(qkv, num_heads):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, dim: int, num_heads: int=8, qkv_bias: bool=False, qk_scale: Optional[float]=None, pre_only: bool=False, dtype=torch.float16, device='cuda'):
+    def __init__(self, dim: int, num_heads: int=8, qkv_bias: bool=False, qk_scale: Optional[float]=None, pre_only: bool=False, dtype=torch.float16, device=None):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -259,7 +259,7 @@ class SelfAttention(nn.Module):
 
 class DismantledBlock(nn.Module):
 
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float=4.0, qkv_bias: bool=False, pre_only: bool=False, dtype=torch.float16, device='cuda', **block_kwargs):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float=4.0, qkv_bias: bool=False, pre_only: bool=False, dtype=torch.float16, device=None, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-06, dtype=dtype, device=device)
         self.attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, pre_only=pre_only, dtype=dtype, device=device)
@@ -324,7 +324,7 @@ class JointBlock(nn.Module):
 
 class FinalLayer(nn.Module):
 
-    def __init__(self, hidden_size: int, patch_size: int, out_channels: int, total_out_channels: Optional[int]=None, dtype=torch.float16, device='cuda'):
+    def __init__(self, hidden_size: int, patch_size: int, out_channels: int, total_out_channels: Optional[int]=None, dtype=torch.float16, device=None):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-06, dtype=dtype, device=device)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True, dtype=dtype, device=device) if total_out_channels is None else nn.Linear(hidden_size, total_out_channels, bias=True, dtype=dtype, device=device)
@@ -339,7 +339,7 @@ class FinalLayer(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, input_size: int=1024, patch_size: int=16, in_channels: int=4, depth: int=28, mlp_ratio: float=4.0, learn_sigma: bool=False, adm_in_channels: Optional[int]=None, context_embedder_config: Optional[Dict]=None, register_length: int=0, out_channels: Optional[int]=None, pos_embed_scaling_factor: Optional[float]=None, pos_embed_offset: Optional[float]=None, pos_embed_max_size: Optional[int]=64, num_patches=4096, qkv_bias: bool=True, dtype=torch.float16, device='cuda'):
+    def __init__(self, input_size: int=1024, patch_size: int=16, in_channels: int=4, depth: int=28, mlp_ratio: float=4.0, learn_sigma: bool=False, adm_in_channels: Optional[int]=None, context_embedder_config: Optional[Dict]=None, register_length: int=0, out_channels: Optional[int]=None, pos_embed_scaling_factor: Optional[float]=None, pos_embed_offset: Optional[float]=None, pos_embed_max_size: Optional[int]=64, num_patches=4096, qkv_bias: bool=True, dtype=torch.float16, device=None):
         super().__init__()
         self.dtype = dtype
         self.learn_sigma = learn_sigma
@@ -426,4 +426,3 @@ if __name__ == '__main__':
     print(output.shape)
     print(output.sum())
 
-'''
