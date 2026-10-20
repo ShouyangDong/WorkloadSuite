@@ -27,7 +27,9 @@ import gc
 import importlib.util
 import random
 import statistics
+import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -197,44 +199,68 @@ def _bench_workload(name: str, *, device_type: str, args: argparse.Namespace) ->
         init_inputs = ref_mod.get_init_inputs()
         inputs = ref_mod.get_inputs()
     except Exception as exc:  # noqa: BLE001
+        print(f"!! load failed for {name}: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         add_row("load", {"error": f"{type(exc).__name__}: {exc}"})
         return rows
 
     common = dict(device_type=device_type, warmup=args.warmup, runs=args.bench_runs)
 
     # ref (reference implementation, eager)
-    model = ref_mod.Model(*init_inputs)
-    model.eval()
     try:
+        model = ref_mod.Model(*init_inputs)
+        model.eval()
         with torch.inference_mode():
             add_row("ref", _benchmark(model, inputs, **common))
     except Exception as exc:  # noqa: BLE001
+        print(f"!! ref failed for {name}: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         add_row("ref", {"error": f"{type(exc).__name__}: {exc}"})
-    del model
-    gc.collect()
+    finally:
+        try:
+            del model
+        except NameError:
+            pass
+        gc.collect()
 
     # eager (optimized implementation, no compile)
-    model = new_mod.Model(*init_inputs)
-    model.eval()
+    model = None
     try:
+        model = new_mod.Model(*init_inputs)
+        model.eval()
         with torch.inference_mode():
             add_row("eager", _benchmark(model, inputs, **common))
     except Exception as exc:  # noqa: BLE001
+        print(f"!! eager failed for {name}: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         add_row("eager", {"error": f"{type(exc).__name__}: {exc}"})
 
     # compile (optimized implementation under torch.compile)
-    with torch.inference_mode():
-        stats = _compile_and_bench(
-            model,
-            inputs,
-            device_type=device_type,
-            warmup=args.warmup,
-            runs=args.bench_runs,
-            compile_mode=args.compile_mode,
-            dynamic=args.dynamic,
-        )
-    add_row("compile", stats)
-    del model
+    if model is not None:
+        try:
+            with torch.inference_mode():
+                stats = _compile_and_bench(
+                    model,
+                    inputs,
+                    device_type=device_type,
+                    warmup=args.warmup,
+                    runs=args.bench_runs,
+                    compile_mode=args.compile_mode,
+                    dynamic=args.dynamic,
+                )
+            add_row("compile", stats)
+        except Exception as exc:  # noqa: BLE001
+            print(f"!! compile failed for {name}: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            add_row("compile", {"error": f"{type(exc).__name__}: {exc}"})
+    else:
+        add_row("compile", {"error": "skipped (eager model not available)"})
+
+    try:
+        if model is not None:
+            del model
+    except NameError:
+        pass
     gc.collect()
 
     return rows
@@ -279,9 +305,20 @@ def _write_markdown(
     lines.append("|---|---|---|---|---|---|")
 
     for workload in workloads:
+        variants = by_workload[workload]
+        if not variants:
+            lines.append(f"| {workload} | — | FAILED (no data) | — | — | — |")
+            continue
+        # If the workload failed to load, report the error explicitly
+        if "load" in variants:
+            err = variants["load"].get("error", "unknown load error")
+            lines.append(f"| {workload} | load | {err} | — | — | — |")
+            continue
+
         for variant in ("ref", "eager", "compile"):
-            stats = by_workload[workload].get(variant, {})
+            stats = variants.get(variant, {})
             if not stats:
+                lines.append(f"| {workload} | {variant} | missing | — | — | — |")
                 continue
             if "error" in stats:
                 lines.append(
@@ -300,6 +337,10 @@ def _write_markdown(
 
     for workload in workloads:
         variants = by_workload[workload]
+        if not variants or "load" in variants:
+            lines.append(f"| {workload} | — | — | — | FAILED | FAILED |")
+            continue
+
         ref = variants.get("ref", {})
         eager = variants.get("eager", {})
         compiled = variants.get("compile", {})
