@@ -365,11 +365,92 @@ class SSDLayer(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, dtype=torch.float16)
         self.norm = nn.RMSNorm(self.d_model, dtype=torch.float16)
 
+    def _native_forward(self, u: torch.Tensor, batch: int, seq_len: int) -> torch.Tensor:
+        """Non-CUDA (e.g. MLU) fallback: reference SSD core in pure PyTorch.
+
+        The fused ``ssd_scan_fused_kernel`` is CUDA/Triton only, so on devices
+        like MLU we fall back to the equivalent native implementation to keep
+        the benchmark runnable and correctness-preserving.
+        """
+        u = self.norm(u)
+        zxbcdt = self.in_proj(u)
+        x, z, B, C, dt = torch.split(
+            zxbcdt,
+            [self.d_inner, self.d_inner, self.n_groups * self.d_state, self.n_groups * self.d_state, self.n_heads],
+            dim=-1,
+        )
+
+        # Short depthwise conv (causal) + activation.
+        x = rearrange(x, "b s d -> b d s")
+        x = self.conv1d(x)[..., :seq_len]
+        x = F.silu(x)
+        x = rearrange(x, "b d s -> b s d")
+
+        # dt discretization (same semantics as the Triton path / ref).
+        dt = dt + self.dt_bias
+        X_b, B_b, C_b, dt_b = prepare_ssd_inputs(
+            x=x,
+            B=B,
+            C=C,
+            dt=dt,
+            n_heads=self.n_heads,
+            d_head=self.d_head,
+            n_groups=self.n_groups,
+            d_state=self.d_state,
+            block_len=self.block_len,
+        )
+        A = -torch.exp(self.A_log)  # fp32
+        A_dt_b = A * dt_b.float()
+
+        Y = self._ssd_core(X_b, B_b, C_b, dt_b, A_dt_b, batch)
+        Y = rearrange(Y, "b c l h p -> b (c l) h p")
+        Y = Y + rearrange(x, "b l (h p) -> b l h p", h=self.n_heads, p=self.d_head) * self.D.view(1, 1, -1, 1)
+        Y = rearrange(Y, "b l h p -> b l (h p)")
+        Y = Y * F.silu(z)
+        return self.out_proj(Y)
+
+    def _ssd_core(self, X_b, B_b, C_b, dt_b, A_dt_b, batch):
+        """Native SSD core (ported from the reference implementation)."""
+        device = X_b.device
+        n_chunks = X_b.shape[1]
+
+        A_cumsum = torch.cumsum(A_dt_b, dim=2)  # [b, c, l, h]
+        A_cumsum = rearrange(A_cumsum, "b c l h -> b c h l")
+
+        # Intra-chunk (diagonal).
+        L = torch.exp(A_cumsum[..., :, None] - A_cumsum[..., None, :])
+        mask = torch.tril(torch.ones(self.block_len, self.block_len, device=device, dtype=torch.bool))
+        L = L.masked_fill(~mask, 0.0)
+
+        M = torch.einsum("bclhn, bcshn -> bchls", C_b, B_b)
+        X_scaled = X_b * dt_b.unsqueeze(-1)
+        Y_diag = torch.einsum("bchls, bcshp -> bclhp", (L * M).to(torch.float16), X_scaled)
+
+        # Inter-chunk (recurrence).
+        decay_to_end = torch.exp(A_cumsum[..., -1:] - A_cumsum).to(torch.float16)
+        block_state = torch.einsum("bclhn, bchl, bclhp -> bchnp", B_b, decay_to_end, X_scaled)
+        chunk_decay = torch.exp(A_cumsum[..., -1])  # fp32
+
+        states = []
+        h = torch.zeros(batch, self.n_heads, self.d_state, self.d_head, device=device, dtype=torch.float32)
+        for i in range(n_chunks):
+            states.append(h.to(torch.float16))
+            h = h * chunk_decay[:, i, :, None, None] + block_state[:, i].float()
+        states = torch.stack(states, dim=1)
+
+        # State-to-output (off-diagonal).
+        decay_from_start = torch.exp(A_cumsum).to(torch.float16)
+        Y_off = torch.einsum("bclhn, bchnp, bchl -> bclhp", C_b, states, decay_from_start)
+        return Y_diag + Y_off
+
     def forward(self, u: torch.Tensor) -> torch.Tensor:
-        assert u.is_cuda, "u must be a CUDA tensor"
         assert u.dtype == torch.float16, "u must be float16"
         batch, seq_len, _ = u.shape
         assert seq_len % self.block_len == 0
+
+        # The fused Triton kernel is CUDA-only; fall back on other devices (e.g. MLU).
+        if u.device.type != "cuda":
+            return self._native_forward(u, batch, seq_len)
 
         # Normalize.
         u = self.norm(u)
@@ -512,7 +593,7 @@ seq_length = 2048
 
 
 def get_inputs():
-    return [torch.randn(batch_size, seq_length, d_model, dtype=torch.float16, device="cuda")]
+    return [torch.randn(batch_size, seq_length, d_model, dtype=torch.float16)]
 
 
 def get_init_inputs():
@@ -524,7 +605,7 @@ if __name__ == "__main__":
     print("Mamba-2 SSD clean model (full 1.3B config) - optimized model_new")
     print("=" * 60)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mlu" if torch.mlu.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     model = Model(*get_init_inputs()).to(device)
     model.eval()
 
@@ -542,12 +623,4 @@ if __name__ == "__main__":
         y = model(x)
     print(f"Output: {tuple(y.shape)}, sum={y.float().sum().item():.4f}")
     print("=" * 60)
-
-'''
-=== perf summary (A/B, ms) ===
-| compile_mode   |    task |      ref |   sp_ref_vs_eager |   sp_task_vs_ref_eager |   sp_task_vs_ref |   sp_task_vs_eager |   p50_ms_ref |   p90_ms_ref |   p99_ms_ref |   p50_ms |   p90_ms |   p99_ms |
-|----------------|---------|----------|-------------------|------------------------|------------------|--------------------|--------------|--------------|--------------|----------|----------|----------|
-| eager          | 829.368 | 1416.85  |             1     |                  1.708 |            1.708 |              1     |     1416.85  |     1439.18  |     1439.45  |  829.368 |  836.653 |  838.309 |
-| default        | 689.635 |  799.717 |             1.772 |                  2.054 |            1.16  |              1.203 |      799.717 |      809.135 |      811.312 |  689.635 |  698.591 |  699.489 |
-| max-autotune   | 651.112 |  769.477 |             1.841 |                  2.176 |            1.182 |              1.274 |      769.477 |      776.316 |      778.586 |  651.112 |  657.702 |  659.233 |
 

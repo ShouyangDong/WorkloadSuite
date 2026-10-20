@@ -202,7 +202,6 @@ def _flash_attn_triton_bhsd(
     Returns tensor of same shape.
     """
     assert causal, "Only causal=True is supported."
-    assert q_bhsd.is_cuda and k_bhsd.is_cuda and v_bhsd.is_cuda
     assert q_bhsd.dtype == torch.float16 and k_bhsd.dtype == torch.float16 and v_bhsd.dtype == torch.float16
     assert q_bhsd.shape == k_bhsd.shape == v_bhsd.shape
     b, h, s, d = q_bhsd.shape

@@ -237,7 +237,3 @@ if __name__ == '__main__':
     print("max:", out.max().item(), "min:", out.min().item())
     print(out.shape, out.dtype)
 
-
-'''
-只是把mask挪到里面
-1, 4096
