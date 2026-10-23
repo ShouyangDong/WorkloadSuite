@@ -120,7 +120,7 @@ def get_init_inputs():
     return [num_classes]
 
 if __name__ == '__main__':
-    torch.set_default_device('cuda')
+    torch.set_default_device("mlu" if torch.mlu.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
     model = Model()
     model.eval()
     inputs = get_inputs()
