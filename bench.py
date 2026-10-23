@@ -370,7 +370,7 @@ def _write_markdown(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default="cuda", help="device to run and time on")
+    parser.add_argument("--device", default=None, help="device to run and time on (default: mlu if available, else cuda)")
     parser.add_argument("--bench-runs", type=int, default=30, help="timed runs per variant")
     parser.add_argument("--warmup", type=int, default=5, help="warmup runs per variant")
     parser.add_argument("--compile-mode", default="default", help="torch.compile mode")
@@ -384,6 +384,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.device is None:
+        args.device = "mlu" if torch.mlu.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(args.device)
     torch.set_default_device(device)
     _set_seed(args.seed)

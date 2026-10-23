@@ -15,6 +15,8 @@ def _num_sms() -> int:
     try:
         if torch.cuda.is_available():
             return int(torch.cuda.get_device_properties(0).multi_processor_count)
+        if torch.mlu.is_available():
+            return int(torch.mlu.get_device_properties(0).multi_processor_count)
     except Exception:
         pass
     return 84
@@ -369,7 +371,7 @@ class DeepSeekMoE(nn.Module):
         # Eagerly initialize weight pointer caches if parameters are already on CUDA.
         # This avoids graph breaks under torch.compile in typical runs where default device is CUDA.
         first = cast(Expert, self.experts[0])
-        if first.w1.weight.device.type == "cuda":
+        if first.w1.weight.device.type in ("cuda", "mlu"):
             device: torch.device = first.w1.weight.device
             w1_addrs = [cast(Expert, self.experts[i]).w1.weight.data_ptr() for i in range(self.n_routed_experts)]
             w2_addrs = [cast(Expert, self.experts[i]).w2.weight.data_ptr() for i in range(self.n_routed_experts)]
@@ -409,8 +411,8 @@ class DeepSeekMoE(nn.Module):
 
         # Routed experts (Triton grouped GEMM)
         device = x.device
-        if device.type != "cuda":
-            # Fallback: correctness-first on non-CUDA.
+        if device.type not in ("cuda", "mlu"):
+            # Fallback: correctness-first on CPU (routed Triton grouped GEMM is CUDA/MLU-only).
             y = torch.zeros_like(x)
             counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
             for i in range(self.n_routed_experts):

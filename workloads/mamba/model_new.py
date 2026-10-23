@@ -22,6 +22,9 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
+        # MLU Triton caps num_warps>4 to 4 (and coerces 2 to 1); num_warps=1 with
+        # the full d_head (P_BLOCK=64) wins here — see ds_mhc_moe / mamba tuning notes.
+        triton.Config({"P_BLOCK": 64}, num_warps=1, num_stages=3),
         triton.Config({"P_BLOCK": 16}, num_warps=4, num_stages=3),
         triton.Config({"P_BLOCK": 32}, num_warps=4, num_stages=3),
         triton.Config({"P_BLOCK": 32}, num_warps=8, num_stages=3),
@@ -448,8 +451,8 @@ class SSDLayer(nn.Module):
         batch, seq_len, _ = u.shape
         assert seq_len % self.block_len == 0
 
-        # The fused Triton kernel is CUDA-only; fall back on other devices (e.g. MLU).
-        if u.device.type != "cuda":
+        # The fused Triton kernel is CUDA/MLU-only; fall back only on CPU.
+        if u.device.type not in ("cuda", "mlu"):
             return self._native_forward(u, batch, seq_len)
 
         # Normalize.
