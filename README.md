@@ -1,6 +1,6 @@
 # WorkloadSuite
 
-Benchmark model workloads for InferArch: each workload ships a reference
+Benchmark model workloads for MASTER: each workload ships a reference
 (PyTorch eager) implementation and an optimized (Triton) implementation of a
 representative inference model, used to benchmark and validate the optimizer.
 
