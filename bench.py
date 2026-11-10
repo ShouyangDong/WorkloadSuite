@@ -38,7 +38,17 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_WORKLOADS = ["resnet", "qwen", "sd3_mmdit", "mamba", "ds_mhc_moe"]
+DEFAULT_WORKLOADS = [
+    "resnet",
+    "qwen",
+    "sd3_mmdit",
+    "mamba",
+    "ds_mhc_moe",
+    "din",
+    "dien",
+    "hstu",
+    "onerec",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +85,8 @@ def _sync(device_type: str) -> None:
 
 def _event_class(device_type: str) -> type[Any] | None:
     """Return the timing Event class for a device (e.g. torch.cuda.Event)."""
+    if device_type == "cpu":
+        return None
     module = getattr(torch, device_type, None)
     event_cls = getattr(module, "Event", None)
     return event_cls if event_cls is not None else None
