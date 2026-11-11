@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from typing import Any
 
 import torch
-
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKLOADS = ("din", "dien", "hstu", "onerec")
@@ -17,7 +17,12 @@ def _load(path: Path, name: str) -> Any:
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
     return module
 
 
@@ -32,29 +37,93 @@ def _assert_tree_close(test: unittest.TestCase, actual: Any, expected: Any) -> N
 
 
 class ApprenticeWorkloadTests(unittest.TestCase):
-    def test_reference_and_optimization_target_are_source_equivalent(self) -> None:
+    def test_reference_and_optimization_candidates_preserve_state_and_outputs(
+        self,
+    ) -> None:
         for workload in WORKLOADS:
             with self.subTest(workload=workload):
                 directory = ROOT / "workloads" / workload
-                reference = _load(directory / "model_ref.py", f"test_{workload}_reference")
-                candidate = _load(directory / "model_new.py", f"test_{workload}_candidate")
+                reference = _load(
+                    directory / "model_ref.py", f"test_{workload}_reference"
+                )
+                candidate = _load(
+                    directory / "model_new.py", f"test_{workload}_candidate"
+                )
 
                 torch.manual_seed(10)
                 reference_model = reference.Model(*reference.get_init_inputs()).eval()
+                if workload == "onerec":
+                    self.assertIs(
+                        reference_model.history_encoder.enable_nested_tensor, False
+                    )
                 torch.manual_seed(20)
                 candidate_model = candidate.Model(*candidate.get_init_inputs()).eval()
-                candidate_model.load_state_dict(reference_model.state_dict(), strict=True)
+                self.assertIsNot(candidate.Model, reference.Model)
+                self.assertEqual(
+                    set(candidate_model.state_dict()), set(reference_model.state_dict())
+                )
+                candidate_model.load_state_dict(
+                    reference_model.state_dict(), strict=True
+                )
 
                 torch.manual_seed(30)
                 inputs = reference.get_inputs()
+                cases = [inputs]
+                if workload in {"din", "dien"}:
+                    varied = [item.clone() for item in inputs]
+                    varied[-1] = torch.arange(varied[-1].numel()) % (
+                        varied[0].shape[1] + 1
+                    )
+                    cases.append(varied)
+                elif workload == "hstu":
+                    cases.append([inputs[0][:3, :17], inputs[1][:3]])
+                else:
+                    all_padding = [item.clone() for item in inputs]
+                    all_padding[2].zero_()
+                    all_padding[3].zero_()
+                    cases.append(all_padding)
                 with torch.inference_mode():
-                    expected = reference_model(*inputs)
-                    actual = candidate_model(*inputs)
-                _assert_tree_close(self, actual, expected)
+                    for case in cases:
+                        expected = reference_model(*case)
+                        actual = candidate_model(*case)
+                        _assert_tree_close(self, actual, expected)
+
+    def test_optimization_candidates_declare_distinct_admission_metadata(self) -> None:
+        candidate_ids = set()
+        for workload in WORKLOADS:
+            candidate = _load(
+                ROOT / "workloads" / workload / "model_new.py",
+                f"test_{workload}_candidate_metadata",
+            )
+            metadata = candidate.get_optimization_metadata()
+            candidate_id = metadata["candidate_id"]
+            self.assertIsInstance(candidate_id, str)
+            self.assertTrue(candidate_id)
+            self.assertNotIn(candidate_id, candidate_ids)
+            candidate_ids.add(candidate_id)
+            self.assertTrue(metadata["techniques"])
+            self.assertIn(metadata["execution_mode"], {"eager", "compile"})
+            self.assertIs(metadata["preserves_state_dict"], True)
+            self.assertIs(metadata["requires_runtime_admission"], True)
 
     def test_cpu_uses_wall_clock_timing(self) -> None:
         bench = _load(ROOT / "bench.py", "test_workloadsuite_bench")
         self.assertIsNone(bench._event_class("cpu"))
+
+    def test_benchmark_loader_registers_modules_for_compiler_replay(self) -> None:
+        bench = _load(ROOT / "bench.py", "test_workloadsuite_bench_loader")
+        for workload in ("hstu", "onerec"):
+            name = f"test_bench_registered_{workload}"
+            module = bench._load_module(
+                ROOT / "workloads" / workload / "model_new.py", name
+            )
+            self.assertIs(sys.modules[name], module)
+            model = module.Model(*module.get_init_inputs()).eval()
+            inputs = module.get_inputs()
+            with torch.inference_mode():
+                expected = model(*inputs)
+                actual = torch.compile(model, backend="eager", fullgraph=False)(*inputs)
+            _assert_tree_close(self, actual, expected)
 
 
 if __name__ == "__main__":

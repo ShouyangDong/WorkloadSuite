@@ -169,7 +169,12 @@ class Model(nn.Module):
             activation="gelu",
             norm_first=False,
         )
-        self.history_encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+        # The optional eval-mode NestedTensor fast path is unsupported on MLU
+        # (NestedTensormlu::_to_copy) for valid all-padding histories. Keep the
+        # dense attention representation, parameters, and output semantics.
+        self.history_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=encoder_layers, enable_nested_tensor=False
+        )
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=dim,
             nhead=num_heads,
