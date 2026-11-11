@@ -1,18 +1,79 @@
-"""Source-equivalent DIEN entry point for eager and ``torch.compile`` benchmarking."""
+"""DIEN candidate with a library-backed batched weighted reduction."""
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
+import torch
+import torch.nn.functional as F
 
 _SOURCE = Path(__file__).with_name("model_ref.py")
 _SPEC = importlib.util.spec_from_file_location("workloadsuite_dien_reference", _SOURCE)
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"cannot load DIEN reference workload: {_SOURCE}")
 _MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 
-Model = _MODULE.Model
+
+class Model(_MODULE.Model):
+    """Preserve both GRUs and lower only the terminal weighted reduction."""
+
+    def __init__(self, vocab_size: int, dim: int, dense_dim: int) -> None:
+        super().__init__(vocab_size, dim, dense_dim)
+        self.register_buffer(
+            "_history_positions",
+            torch.arange(_MODULE.SEQUENCE_LENGTH).unsqueeze(0),
+            persistent=False,
+        )
+
+    def forward(
+        self,
+        history: torch.Tensor,
+        target: torch.Tensor,
+        dense: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        history_embedding = self.embedding(history)
+        interests, _ = self.extractor(history_embedding)
+        evolved, _ = self.evolution(interests)
+        target_embedding = self.embedding(target)
+        dim = evolved.shape[-1]
+        evolved_scores = F.linear(
+            evolved, self.attention.weight[:, :dim], self.attention.bias
+        )
+        target_scores = F.linear(
+            target_embedding, self.attention.weight[:, dim:], bias=None
+        ).unsqueeze(1)
+        scores = (evolved_scores + target_scores).squeeze(-1)
+        positions = self._history_positions[:, : history.size(1)]
+        mask = positions < lengths.unsqueeze(1)
+        scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=1)
+        interest = torch.bmm(weights.unsqueeze(1), evolved).squeeze(1)
+        return self.head(
+            torch.cat((interest, target_embedding, dense), dim=-1)
+        ).squeeze(-1)
+
+
+OPTIMIZATION_METADATA = {
+    "candidate_id": "dien-library-weighted-reduction-v1",
+    "techniques": (
+        "hoist_target_invariant_attention_projection",
+        "batched_library_weighted_reduction",
+        "hoist_history_positions",
+    ),
+    "execution_mode": "eager",
+    "preserves_state_dict": True,
+    "requires_runtime_admission": True,
+}
+
+
+def get_optimization_metadata() -> dict[str, object]:
+    return dict(OPTIMIZATION_METADATA)
+
+
 get_inputs = _MODULE.get_inputs
 get_init_inputs = _MODULE.get_init_inputs
