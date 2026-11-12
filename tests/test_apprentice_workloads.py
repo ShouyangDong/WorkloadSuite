@@ -37,17 +37,12 @@ def _assert_tree_close(test: unittest.TestCase, actual: Any, expected: Any) -> N
 
 
 class ApprenticeWorkloadTests(unittest.TestCase):
-    def test_reference_and_optimization_candidates_preserve_state_and_outputs(
-        self,
-    ) -> None:
+    def test_reference_models_cover_recommendation_edge_cases(self) -> None:
         for workload in WORKLOADS:
             with self.subTest(workload=workload):
                 directory = ROOT / "workloads" / workload
                 reference = _load(
                     directory / "model_ref.py", f"test_{workload}_reference"
-                )
-                candidate = _load(
-                    directory / "model_new.py", f"test_{workload}_candidate"
                 )
 
                 torch.manual_seed(10)
@@ -56,16 +51,6 @@ class ApprenticeWorkloadTests(unittest.TestCase):
                     self.assertIs(
                         reference_model.history_encoder.enable_nested_tensor, False
                     )
-                torch.manual_seed(20)
-                candidate_model = candidate.Model(*candidate.get_init_inputs()).eval()
-                self.assertIsNot(candidate.Model, reference.Model)
-                self.assertEqual(
-                    set(candidate_model.state_dict()), set(reference_model.state_dict())
-                )
-                candidate_model.load_state_dict(
-                    reference_model.state_dict(), strict=True
-                )
-
                 torch.manual_seed(30)
                 inputs = reference.get_inputs()
                 cases = [inputs]
@@ -85,26 +70,18 @@ class ApprenticeWorkloadTests(unittest.TestCase):
                 with torch.inference_mode():
                     for case in cases:
                         expected = reference_model(*case)
-                        actual = candidate_model(*case)
+                        actual = reference_model(*case)
                         _assert_tree_close(self, actual, expected)
 
-    def test_optimization_candidates_declare_distinct_admission_metadata(self) -> None:
-        candidate_ids = set()
-        for workload in WORKLOADS:
-            candidate = _load(
-                ROOT / "workloads" / workload / "model_new.py",
-                f"test_{workload}_candidate_metadata",
-            )
-            metadata = candidate.get_optimization_metadata()
-            candidate_id = metadata["candidate_id"]
-            self.assertIsInstance(candidate_id, str)
-            self.assertTrue(candidate_id)
-            self.assertNotIn(candidate_id, candidate_ids)
-            candidate_ids.add(candidate_id)
-            self.assertTrue(metadata["techniques"])
-            self.assertIn(metadata["execution_mode"], {"eager", "compile"})
-            self.assertIs(metadata["preserves_state_dict"], True)
-            self.assertIs(metadata["requires_runtime_admission"], True)
+    def test_each_workload_has_only_one_model_source(self) -> None:
+        directories = sorted(
+            path for path in (ROOT / "workloads").iterdir() if path.is_dir()
+        )
+        self.assertTrue(directories)
+        for directory in directories:
+            with self.subTest(workload=directory.name):
+                self.assertTrue((directory / "model_ref.py").is_file())
+                self.assertFalse((directory / "model_new.py").exists())
 
     def test_cpu_uses_wall_clock_timing(self) -> None:
         bench = _load(ROOT / "bench.py", "test_workloadsuite_bench")
@@ -115,7 +92,7 @@ class ApprenticeWorkloadTests(unittest.TestCase):
         for workload in ("hstu", "onerec"):
             name = f"test_bench_registered_{workload}"
             module = bench._load_module(
-                ROOT / "workloads" / workload / "model_new.py", name
+                ROOT / "workloads" / workload / "model_ref.py", name
             )
             self.assertIs(sys.modules[name], module)
             model = module.Model(*module.get_init_inputs()).eval()
