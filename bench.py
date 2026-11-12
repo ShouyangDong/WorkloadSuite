@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Benchmark eager / torch.compile / ref across the WorkloadSuite workloads.
+"""Benchmark eager and torch.compile across the WorkloadSuite workloads.
 
-For each workload under ``workloads/``, load the reference (``model_ref.py``)
-and the optimized (``model_new.py``) implementations and time three variants:
+For each workload under ``workloads/``, load its sole implementation from
+``model_ref.py`` and time two execution modes:
 
-* ``ref``     — ``model_ref.py``, eager
-* ``eager``   — ``model_new.py``, eager (no ``torch.compile``)
-* ``compile`` — ``model_new.py``, wrapped with ``torch.compile``
+* ``eager``   — ``model_ref.py`` executed directly
+* ``compile`` — the same model instance wrapped with ``torch.compile``
 
 Results are printed to stdout and written to a Markdown summary (default
 ``results/benchmark.md``).
 
-The harness is self-contained: it uses the ``Model`` / ``get_inputs`` /
-``get_init_inputs`` convention shared by every workload file and does not
-depend on any external LEGO tooling.
+The harness is self-contained and compares compiler execution modes rather
+than pre-optimized source implementations.
 
 Example::
 
@@ -63,7 +61,7 @@ def _set_seed(seed: int) -> None:
 
 
 def _set_f32_config() -> None:
-    """Disable TF32 so timing matches the LEGO reference setup."""
+    """Disable TF32 so eager and compiled execution use the same policy."""
     try:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
@@ -93,7 +91,7 @@ def _event_class(device_type: str) -> type[Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Module loading (isolated, so ref/new files with identical basenames coexist)
+# Module loading
 # ---------------------------------------------------------------------------
 
 
@@ -202,8 +200,7 @@ def _compile_and_bench(
 
 def _bench_workload(name: str, *, device_type: str, args: argparse.Namespace) -> list[dict[str, Any]]:
     workload_dir = ROOT / "workloads" / name
-    ref_path = workload_dir / "model_ref.py"
-    new_path = workload_dir / "model_new.py"
+    model_path = workload_dir / "model_ref.py"
 
     rows: list[dict[str, Any]] = []
 
@@ -211,10 +208,9 @@ def _bench_workload(name: str, *, device_type: str, args: argparse.Namespace) ->
         rows.append({"workload": name, "variant": variant, **stats})
 
     try:
-        ref_mod = _load_module(ref_path, f"ws_{name}_ref")
-        new_mod = _load_module(new_path, f"ws_{name}_new")
-        init_inputs = ref_mod.get_init_inputs()
-        inputs = ref_mod.get_inputs()
+        model_module = _load_module(model_path, f"ws_{name}_model")
+        init_inputs = model_module.get_init_inputs()
+        inputs = model_module.get_inputs()
     except Exception as exc:  # noqa: BLE001
         print(f"!! load failed for {name}: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -223,27 +219,9 @@ def _bench_workload(name: str, *, device_type: str, args: argparse.Namespace) ->
 
     common = dict(device_type=device_type, warmup=args.warmup, runs=args.bench_runs)
 
-    # ref (reference implementation, eager)
-    try:
-        model = ref_mod.Model(*init_inputs)
-        model.eval()
-        with torch.inference_mode():
-            add_row("ref", _benchmark(model, inputs, **common))
-    except Exception as exc:  # noqa: BLE001
-        print(f"!! ref failed for {name}: {exc}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        add_row("ref", {"error": f"{type(exc).__name__}: {exc}"})
-    finally:
-        try:
-            del model
-        except NameError:
-            pass
-        gc.collect()
-
-    # eager (optimized implementation, no compile)
     model = None
     try:
-        model = new_mod.Model(*init_inputs)
+        model = model_module.Model(*init_inputs)
         model.eval()
         with torch.inference_mode():
             add_row("eager", _benchmark(model, inputs, **common))
@@ -252,7 +230,8 @@ def _bench_workload(name: str, *, device_type: str, args: argparse.Namespace) ->
         traceback.print_exc(file=sys.stderr)
         add_row("eager", {"error": f"{type(exc).__name__}: {exc}"})
 
-    # compile (optimized implementation under torch.compile)
+    # Compile the exact model instance measured above. This keeps weights,
+    # buffers, mode, and source code identical between the two variants.
     if model is not None:
         try:
             with torch.inference_mode():
@@ -332,7 +311,7 @@ def _write_markdown(
             lines.append(f"| {workload} | load | {err} | — | — | — |")
             continue
 
-        for variant in ("ref", "eager", "compile"):
+        for variant in ("eager", "compile"):
             stats = variants.get(variant, {})
             if not stats:
                 lines.append(f"| {workload} | {variant} | missing | — | — | — |")
@@ -348,32 +327,30 @@ def _write_markdown(
                 f"| {_fmt(stats['p90_ms'])} | {_fmt(stats['p99_ms'])} |"
             )
 
-    lines.append("\n## Summary vs reference\n")
-    lines.append("| workload | ref (ms) | eager (ms) | compile (ms) | eager vs ref | compile vs ref |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("\n## Summary\n")
+    lines.append("| workload | eager (ms) | compile (ms) | compile vs eager |")
+    lines.append("|---|---|---|---|")
 
     for workload in workloads:
         variants = by_workload[workload]
         if not variants or "load" in variants:
-            lines.append(f"| {workload} | — | — | — | FAILED | FAILED |")
+            lines.append(f"| {workload} | — | — | FAILED |")
             continue
 
-        ref = variants.get("ref", {})
         eager = variants.get("eager", {})
         compiled = variants.get("compile", {})
 
-        ref_ms = ref.get("median_ms")
         eager_ms = eager.get("median_ms")
         compile_ms = compiled.get("median_ms")
 
-        def speedup(candidate: float | None, baseline: float | None) -> str:
-            if candidate is None or baseline is None or not baseline:
+        def speedup(compiled: float | None, eager: float | None) -> str:
+            if compiled is None or eager is None or not eager:
                 return "—"
-            return f"{baseline / candidate:.2f}x" if candidate else "—"
+            return f"{eager / compiled:.2f}x" if compiled else "—"
 
         lines.append(
-            f"| {workload} | {_fmt(ref_ms)} | {_fmt(eager_ms)} | {_fmt(compile_ms)} "
-            f"| {speedup(eager_ms, ref_ms)} | {speedup(compile_ms, ref_ms)} |"
+            f"| {workload} | {_fmt(eager_ms)} | {_fmt(compile_ms)} "
+            f"| {speedup(compile_ms, eager_ms)} |"
         )
 
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
