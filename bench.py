@@ -46,6 +46,12 @@ DEFAULT_WORKLOADS = [
     "dien",
     "hstu",
     "onerec",
+    "swin",
+    "bert",
+    "sd_unet",
+    "conformer",
+    "graphsage",
+    "fno2d",
 ]
 
 
