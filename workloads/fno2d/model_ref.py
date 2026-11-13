@@ -17,6 +17,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class CoordinateGrid(nn.Module):
+    """Keep data-dependent tensor factories behind an explicit FX boundary."""
+
+    _master_opaque_boundary = True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, _, height, width = x.shape
+        grid_y = torch.linspace(0, 1, height, device=x.device, dtype=x.dtype)
+        grid_x = torch.linspace(0, 1, width, device=x.device, dtype=x.dtype)
+        y, x_coordinate = torch.meshgrid(grid_y, grid_x, indexing="ij")
+        grid = torch.stack((x_coordinate, y), dim=0).unsqueeze(0)
+        return grid.expand(batch, -1, -1, -1)
+
+
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, modes1: int, modes2: int) -> None:
         super().__init__()
@@ -98,6 +112,7 @@ class Model(nn.Module):
         num_layers: int = 4,
     ) -> None:
         super().__init__()
+        self.coordinate_grid = CoordinateGrid()
         self.lift = nn.Conv2d(in_channels + 2, width, kernel_size=1)
         self.layers = nn.ModuleList(
             FourierLayer(width, modes1, modes2) for _ in range(num_layers)
@@ -108,17 +123,8 @@ class Model(nn.Module):
             nn.Conv2d(width * 2, out_channels, kernel_size=1),
         )
 
-    @staticmethod
-    def _grid(x: torch.Tensor) -> torch.Tensor:
-        batch, _, height, width = x.shape
-        grid_y = torch.linspace(0, 1, height, device=x.device, dtype=x.dtype)
-        grid_x = torch.linspace(0, 1, width, device=x.device, dtype=x.dtype)
-        y, x_coordinate = torch.meshgrid(grid_y, grid_x, indexing="ij")
-        grid = torch.stack((x_coordinate, y), dim=0).unsqueeze(0)
-        return grid.expand(batch, -1, -1, -1)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.lift(torch.cat((x, self._grid(x)), dim=1))
+        x = self.lift(torch.cat((x, self.coordinate_grid(x)), dim=1))
         for layer in self.layers:
             x = layer(x)
         return self.project(x)
